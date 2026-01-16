@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>RSVP Reader</title>
+  <style>
+    :root{
+      --bg:#000;
+      --text:#fff;
+      --muted:rgba(255,255,255,0.65);
+      --border:rgba(255,255,255,0.16);
+      --accent:#ff3b3b;
+      --btnbg:rgba(255,255,255,0.08);
+      --btnbg2:rgba(255,255,255,0.12);
+    }
+
+    *{ box-sizing:border-box; }
+    html,body{
+      height:100%;
+      margin:0;
+      background:var(--bg);
+      color:var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial;
+      overscroll-behaviour:none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .app{
+      height:100%;
+      display:flex;
+      flex-direction:column;
+      padding: env(safe-area-inset-top) 14px env(safe-area-inset-bottom) 14px;
+    }
+
+    .centre{
+      flex:1;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      min-height:0;
+    }
+
+    /* RSVP line: left aligned right, focus centred, right aligned left */
+    .rsvp{
+      width:100%;
+      max-width: 900px;
+      display:grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items:baseline;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+      font-size: clamp(30px, 10vw, 72px);
+      line-height:1.1;
+      letter-spacing:0.4px;
+      white-space:nowrap;
+      padding: 8px 6px;
+    }
+    .left{
+      text-align:right;
+      padding-right:2px;
+      opacity:0.95;
+      overflow:hidden;
+    }
+    .focus{
+      color:var(--accent);
+      font-weight:900;
+      padding:0 2px;
+    }
+    .right{
+      text-align:left;
+      padding-left:2px;
+      opacity:0.95;
+      overflow:hidden;
+    }
+
+    .bottom{
+      padding-top: 10px;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+
+    .row{
+      display:grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap:10px;
+    }
+
+    button{
+      appearance:none;
+      border:1px solid var(--border);
+      background:var(--btnbg);
+      color:var(--text);
+      border-radius:14px;
+      padding:14px 10px;
+      font-size:16px;
+      font-weight:700;
+      cursor:pointer;
+      user-select:none;
+    }
+    button:active{
+      background:var(--btnbg2);
+      transform: translateY(1px);
+    }
+
+    .speedRow{
+      display:grid;
+      grid-template-columns: 1fr 1.2fr 1fr;
+      gap:10px;
+      align-items:center;
+    }
+
+    .speedBox{
+      text-align:center;
+      color:var(--muted);
+      font-weight:700;
+      font-size:15px;
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:14px 10px;
+      background: rgba(255,255,255,0.04);
+    }
+
+    .toast{
+      position:fixed;
+      left:50%;
+      bottom: calc(env(safe-area-inset-bottom) + 110px);
+      transform: translateX(-50%);
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px solid rgba(255, 59, 59, 0.35);
+      background: rgba(255, 59, 59, 0.12);
+      color: rgba(255,255,255,0.95);
+      font-size:14px;
+      max-width: 92vw;
+      display:none;
+      text-align:center;
+      white-space: pre-line;
+    }
+
+    .tiny{
+      position:fixed;
+      top: calc(env(safe-area-inset-top) + 10px);
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255,255,255,0.30);
+      font-size: 12px;
+      letter-spacing: 0.3px;
+      user-select:none;
+      pointer-events:none;
+      white-space:nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="tiny" id="progressTiny"></div>
+
+    <div class="centre">
+      <div class="rsvp" aria-live="polite">
+        <span class="left" id="leftPart"></span>
+        <span class="focus" id="focusChar">•</span>
+        <span class="right" id="rightPart"></span>
+      </div>
+    </div>
+
+    <div class="bottom">
+      <div class="row">
+        <button id="backBtn">Back 100</button>
+        <button id="playPauseBtn">Play</button>
+        <button id="fwdBtn">Forward 100</button>
+      </div>
+
+      <div class="speedRow">
+        <button id="slowerBtn">-10</button>
+        <div class="speedBox" id="speedBox">350 WPM</div>
+        <button id="fasterBtn">+10</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    (function () {
+      "use strict";
+
+      // -------- settings --------
+      const DEFAULT_FILE = "reader.txt";
+      const DEFAULT_WPM = 350;
+      const SENTENCE_HOLD_MS = 500;   // extra hold for sentence-ending word
+      const JUMP_WORDS = 100;
+
+      // -------- localStorage keys --------
+      const LS_IDX  = "rsvp_idx";
+      const LS_WPM  = "rsvp_wpm";
+      const LS_FILE = "rsvp_file";
+
+      // -------- elements --------
+      const leftPartEl = document.getElementById("leftPart");
+      const focusCharEl = document.getElementById("focusChar");
+      const rightPartEl = document.getElementById("rightPart");
+
+      const backBtn = document.getElementById("backBtn");
+      const playPauseBtn = document.getElementById("playPauseBtn");
+      const fwdBtn = document.getElementById("fwdBtn");
+
+      const slowerBtn = document.getElementById("slowerBtn");
+      const fasterBtn = document.getElementById("fasterBtn");
+      const speedBox = document.getElementById("speedBox");
+
+      const toastEl = document.getElementById("toast");
+      const progressTiny = document.getElementById("progressTiny");
+
+      // -------- state --------
+      let words = [];
+      let idx = 0;
+      let wpm = DEFAULT_WPM;
+      let playing = false;
+      let timer = null;
+
+      function clamp(n, lo, hi) {
+        return Math.max(lo, Math.min(hi, n));
+      }
+
+      function normaliseWpm(n) {
+        const x = Number(n);
+        if (!Number.isFinite(x)) return DEFAULT_WPM;
+        return clamp(Math.round(x), 50, 2000);
+      }
+
+      function msPerWord() {
+        return Math.round(60000 / wpm);
+      }
+
+      function isSentenceEnd(word) {
+        return /[.!?]["')\]]*$/.test(word);
+      }
+
+      function computeFocusIndex(word) {
+        const len = word.length;
+        if (len <= 1) return 0;
+        const raw = Math.floor(len * 0.30);
+        return clamp(raw, 0, len - 1);
+      }
+
+      function splitForDisplay(word) {
+        const i = computeFocusIndex(word);
+        return {
+          left: word.slice(0, i),
+          focus: word.slice(i, i + 1),
+          right: word.slice(i + 1)
+        };
+      }
+
+      function render() {
+        if (!words.length) {
+          leftPartEl.textContent = "";
+          focusCharEl.textContent = "•";
+          rightPartEl.textContent = "";
+          progressTiny.textContent = "";
+          return;
+        }
+
+        idx = clamp(idx, 0, words.length - 1);
+        const w = words[idx];
+        const parts = splitForDisplay(w);
+
+        leftPartEl.textContent = parts.left;
+        focusCharEl.textContent = parts.focus || "";
+        rightPartEl.textContent = parts.right;
+
+        progressTiny.textContent = `${idx + 1} / ${words.length}`;
+      }
+
+      function setSpeedBox() {
+        speedBox.textContent = `${wpm} WPM`;
+      }
+
+      function setPlayButton() {
+        playPauseBtn.textContent = playing ? "Pause" : "Play";
+      }
+
+      function stopTimer() {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      }
+
+      function saveOnPause() {
+        // Save ONLY when pausing (word index + WPM)
+        localStorage.setItem(LS_IDX, String(idx));
+        localStorage.setItem(LS_WPM, String(wpm));
+      }
+
+      function saveFileName(name) {
+        localStorage.setItem(LS_FILE, name);
+      }
+
+      function scheduleNext() {
+        stopTimer();
+        if (!playing || !words.length) return;
+
+        const base = msPerWord();
+        const extra = isSentenceEnd(words[idx] || "") ? SENTENCE_HOLD_MS : 0;
+        const delay = base + extra;
+
+        timer = setTimeout(() => {
+          if (!playing) return;
+
+          idx += 1;
+          if (idx >= words.length) {
+            idx = words.length - 1;
+            render();
+            pause();
+            return;
+          }
+
+          render();
+          scheduleNext();
+        }, delay);
+      }
+
+      function play() {
+        if (!words.length) return;
+        playing = true;
+        setPlayButton();
+        scheduleNext();
+      }
+
+      function pause() {
+        if (!playing) return;
+        playing = false;
+        stopTimer();
+        setPlayButton();
+        saveOnPause();
+      }
+
+      function togglePlayPause() {
+        if (playing) pause();
+        else play();
+      }
+
+      function jump(delta) {
+        if (!words.length) return;
+        idx = clamp(idx + delta, 0, words.length - 1);
+        render();
+        if (playing) scheduleNext();
+      }
+
+      function setWpm(newWpm) {
+        wpm = normaliseWpm(newWpm);
+        setSpeedBox();
+        if (playing) scheduleNext();
+        // Note: we do NOT save here; we save when you pause.
+      }
+
+      function showToast(msg) {
+        toastEl.textContent = msg;
+        toastEl.style.display = "block";
+        clearTimeout(showToast._t);
+        showToast._t = setTimeout(() => {
+          toastEl.style.display = "none";
+        }, 2500);
+      }
+
+      function parseTextToWords(text) {
+        return text
+          .replace(/\uFEFF/g, "")
+          .split(/\s+/g)
+          .map(s => s.trim())
+          .filter(Boolean);
+      }
+
+      async function loadTextFile(fileName) {
+        const clean = (fileName || "").trim() || DEFAULT_FILE;
+        saveFileName(clean);
+
+        try {
+          const res = await fetch(clean, { cache: "no-store" });
+          if (!res.ok) throw new Error(`Could not load ${clean} (HTTP ${res.status})`);
+
+          const txt = await res.text();
+          const parsed = parseTextToWords(txt);
+          if (!parsed.length) throw new Error(`${clean} loaded but has no words`);
+
+          words = parsed;
+
+          const savedIdx = Number(localStorage.getItem(LS_IDX) || "0");
+          idx = Number.isFinite(savedIdx) ? clamp(savedIdx, 0, words.length - 1) : 0;
+
+          render();
+          // Always start paused on load (and do not overwrite saved state)
+          playing = false;
+          stopTimer();
+          setPlayButton();
+        } catch (e) {
+          words = [];
+          idx = 0;
+          render();
+          playing = false;
+          stopTimer();
+          setPlayButton();
+
+          showToast(
+            "Could not load reader.txt.\n" +
+            "If you opened this file directly, run a tiny local server.\n" +
+            "Example: python3 -m http.server"
+          );
+        }
+      }
+
+      // -------- buttons --------
+      backBtn.addEventListener("click", () => jump(-JUMP_WORDS));
+      fwdBtn.addEventListener("click", () => jump(JUMP_WORDS));
+      playPauseBtn.addEventListener("click", () => togglePlayPause());
+
+      slowerBtn.addEventListener("click", () => setWpm(wpm - 10));
+      fasterBtn.addEventListener("click", () => setWpm(wpm + 10));
+
+      // Tap the word area to toggle play/pause (nice on mobile)
+      document.querySelector(".centre").addEventListener("click", () => togglePlayPause());
+
+      // Auto-pause when leaving (this triggers saving index + WPM)
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) pause();
+      });
+      window.addEventListener("beforeunload", () => pause());
+
+      // -------- boot --------
+      (function boot() {
+        const savedWpm = localStorage.getItem(LS_WPM);
+        wpm = normaliseWpm(savedWpm !== null ? savedWpm : DEFAULT_WPM);
+        setSpeedBox();
+        setPlayButton();
+        render();
+
+        const savedFile = localStorage.getItem(LS_FILE) || DEFAULT_FILE;
+        loadTextFile(savedFile);
+      })();
+
+    })();
+  </script>
+</body>
+</html>
