@@ -31,11 +31,11 @@
       display:flex;
       flex-direction:column;
 
-      /* extra padding left/right */
+      /* extra padding left/right + extra bottom breathing room */
       padding:
         env(safe-area-inset-top)
         42px
-        env(safe-area-inset-bottom)
+        calc(env(safe-area-inset-bottom) + 40px)
         42px;
     }
 
@@ -210,6 +210,9 @@
       const SEMICOLON_HOLD_MS = 300;  // ;
       const DASH_HOLD_MS = 300;       // pseudo-  or  word–  etc
 
+      // newline pauses (headings, paragraph breaks)
+      const NEWLINE_HOLD_MS = 450;
+
       const JUMP_WORDS = 10;
 
       // Font fitting
@@ -266,35 +269,65 @@
         return Math.round(60000 / wpm);
       }
 
+      // Allow lots of trailing "closers" after punctuation:
+      // straight quotes " '
+      // curly quotes ” ’
+      // brackets ) ] }
+      // french/angle quotes »
+      const TRAIL_CLOSERS = `["')\\]\\}”’»]`;
+
+      function stripNewlineMarkers(word) {
+        return (word || "").replace(/\n+$/g, "");
+      }
+
+      function countTrailingNewlines(word) {
+        const m = (word || "").match(/\n+$/);
+        return m ? m[0].length : 0;
+      }
+
       function isSentenceEnd(word) {
-        return /[.!?]["')\]]*$/.test(word);
+        const re = new RegExp(`[.!?](?:${TRAIL_CLOSERS})*$`);
+        return re.test(word);
       }
 
       function isCommaEnd(word) {
-        return /,["')\]]*$/.test(word);
+        const re = new RegExp(`,(?:${TRAIL_CLOSERS})*$`);
+        return re.test(word);
       }
 
       function isColonEnd(word) {
-        return /:["')\]]*$/.test(word);
+        const re = new RegExp(`:(?:${TRAIL_CLOSERS})*$`);
+        return re.test(word);
       }
 
       function isSemicolonEnd(word) {
-        return /;["')\]]*$/.test(word);
+        const re = new RegExp(`;(?:${TRAIL_CLOSERS})*$`);
+        return re.test(word);
       }
 
       // Includes common hyphen/dash characters:
       // - ‐ - ‒ – — − ﹣ －
       function isDashEnd(word) {
-        return /[-‐-‒–—−﹣－]["')\]]*$/.test(word);
+        const re = new RegExp(`[-\\u2010\\u2011\\u2012\\u2013\\u2014\\u2212\\uFE63\\uFF0D](?:${TRAIL_CLOSERS})*$`);
+        return re.test(word);
       }
 
-      function extraHoldMs(word) {
-        if (isSentenceEnd(word)) return SENTENCE_HOLD_MS;
-        if (isColonEnd(word)) return COLON_HOLD_MS;
-        if (isSemicolonEnd(word)) return SEMICOLON_HOLD_MS;
-        if (isCommaEnd(word)) return COMMA_HOLD_MS;
-        if (isDashEnd(word)) return DASH_HOLD_MS;
-        return 0;
+      function extraHoldMs(wordRaw) {
+        // newline hold always applies, even if no punctuation (headings, titles)
+        const nlCount = countTrailingNewlines(wordRaw);
+        const newlineHold = nlCount * NEWLINE_HOLD_MS;
+
+        // punctuation checks should ignore newline markers
+        const word = stripNewlineMarkers(wordRaw);
+
+        let punct = 0;
+        if (isSentenceEnd(word)) punct = SENTENCE_HOLD_MS;
+        else if (isColonEnd(word)) punct = COLON_HOLD_MS;
+        else if (isSemicolonEnd(word)) punct = SEMICOLON_HOLD_MS;
+        else if (isCommaEnd(word)) punct = COMMA_HOLD_MS;
+        else if (isDashEnd(word)) punct = DASH_HOLD_MS;
+
+        return newlineHold + punct;
       }
 
       function computeFocusIndex(word) {
@@ -305,7 +338,8 @@
         return clamp(raw, 0, len - 1);
       }
 
-      function splitForDisplay(word) {
+      function splitForDisplay(wordRaw) {
+        const word = stripNewlineMarkers(wordRaw);
         const i = computeFocusIndex(word);
         return {
           left: word.slice(0, i),
@@ -482,7 +516,8 @@
       const DASH_ONLY_RE = new RegExp(`^[${DASH_CLASS}]$`);
 
       function stripTrailingPunct(token) {
-        const m = token.match(/^(.*?)([.,!?;:]+["')\]]*)$/);
+        // Also allow curly quotes and extra closers
+        const m = token.match(/^(.*?)([.,!?;:]+["')\]\}”’»]*)$/);
         if (!m) return { base: token, trail: "" };
         return { base: m[1], trail: m[2] };
       }
@@ -522,17 +557,43 @@
       }
 
       function parseTextToWords(text) {
-        const raw = text
+        const cleaned = (text || "")
           .replace(/\uFEFF/g, "")
-          .split(/\s+/g)
-          .map(s => s.trim())
-          .filter(Boolean);
+          .replace(/\r\n/g, "\n")
+          .replace(/\r/g, "\n");
 
+        const lines = cleaned.split("\n");
         const expanded = [];
-        for (const tok of raw) {
-          const pieces = expandDashToken(tok);
-          for (const p of pieces) expanded.push(p);
+
+        // We add "\n" markers onto the final word of each line.
+        // Blank lines stack extra "\n" markers, giving a longer pause.
+        for (let li = 0; li < lines.length; li++) {
+          const lineRaw = lines[li];
+          const line = lineRaw.trim();
+
+          if (line.length > 0) {
+            const rawWords = line
+              .split(/\s+/g)
+              .map(s => s.trim())
+              .filter(Boolean);
+
+            for (const tok of rawWords) {
+              const pieces = expandDashToken(tok);
+              for (const p of pieces) expanded.push(p);
+            }
+
+            // End-of-line pause marker (if not last line in file)
+            if (li < lines.length - 1 && expanded.length) {
+              expanded[expanded.length - 1] = expanded[expanded.length - 1] + "\n";
+            }
+          } else {
+            // Blank line: extend the previous word's newline markers
+            if (li < lines.length - 1 && expanded.length) {
+              expanded[expanded.length - 1] = expanded[expanded.length - 1] + "\n";
+            }
+          }
         }
+
         return expanded;
       }
 
