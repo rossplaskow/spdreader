@@ -30,24 +30,32 @@
       height:100%;
       display:flex;
       flex-direction:column;
-      padding: env(safe-area-inset-top) 14px env(safe-area-inset-bottom) 14px;
+
+      /* extra padding left/right */
+      padding:
+        env(safe-area-inset-top)
+        42px
+        env(safe-area-inset-bottom)
+        42px;
     }
 
     .centre{
       flex:1;
       display:flex;
       align-items:center;
-      justify-content:center;
+      justify-content:flex-start;
       min-height:0;
     }
 
-    /* RSVP line: left aligned right, focus centred, right aligned left */
+    /* RSVP line: LEFT ALIGNED */
     .rsvp{
       width:100%;
       max-width: 900px;
-      display:grid;
-      grid-template-columns: 1fr auto 1fr;
+
+      display:flex;
       align-items:baseline;
+      justify-content:flex-start;
+
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
 
       /* Base size, JS may reduce it on long words */
@@ -56,25 +64,25 @@
       line-height:1.1;
       letter-spacing:0.4px;
       white-space:nowrap;
-      padding: 8px 6px;
 
-      /* Shift a few px left to reduce right-edge clipping */
-      transform: translateX(-30px);
+      /* breathing room inside word area */
+      padding: 10px 10px;
+
+      transform:none;
     }
+
     .left{
-      text-align:right;
-      padding-right:2px;
+      text-align:left;
       opacity:0.95;
       overflow:hidden;
     }
     .focus{
       color:var(--accent);
       font-weight:900;
-      padding:0 2px;
+      padding:0;
     }
     .right{
       text-align:left;
-      padding-left:2px;
       opacity:0.95;
       overflow:hidden;
     }
@@ -195,17 +203,21 @@
       const DEFAULT_FILE = "reader.txt";
       const DEFAULT_WPM = 250;
 
-      const SENTENCE_HOLD_MS = 500; // . ! ?
-      const COMMA_HOLD_MS = 250;    // ,
+      // pauses
+      const SENTENCE_HOLD_MS = 500;   // . ! ?
+      const COMMA_HOLD_MS = 350;      // ,
+      const COLON_HOLD_MS = 350;      // :
+      const SEMICOLON_HOLD_MS = 300;  // ;
+      const DASH_HOLD_MS = 300;       // pseudo-  or  word–  etc
 
       const JUMP_WORDS = 10;
 
       // Font fitting
       const MIN_FONT_PX = 18;
-      const FIT_PADDING_PX = 16;
+      const FIT_PADDING_PX = 22;
 
-      // Focus letter position in word (0.40 = 40%)
-      const FOCUS_FRACTION = 0.25;
+      // Focus letter position in word
+      const FOCUS_FRACTION = 0.0; // first letter
 
       // -------- localStorage keys --------
       const LS_IDX  = "rsvp_idx";
@@ -262,9 +274,26 @@
         return /,["')\]]*$/.test(word);
       }
 
+      function isColonEnd(word) {
+        return /:["')\]]*$/.test(word);
+      }
+
+      function isSemicolonEnd(word) {
+        return /;["')\]]*$/.test(word);
+      }
+
+      // Includes common hyphen/dash characters:
+      // - ‐ - ‒ – — − ﹣ －
+      function isDashEnd(word) {
+        return /[-‐-‒–—−﹣－]["')\]]*$/.test(word);
+      }
+
       function extraHoldMs(word) {
         if (isSentenceEnd(word)) return SENTENCE_HOLD_MS;
+        if (isColonEnd(word)) return COLON_HOLD_MS;
+        if (isSemicolonEnd(word)) return SEMICOLON_HOLD_MS;
         if (isCommaEnd(word)) return COMMA_HOLD_MS;
+        if (isDashEnd(word)) return DASH_HOLD_MS;
         return 0;
       }
 
@@ -333,24 +362,13 @@
         const containerWidth = rsvpLine.clientWidth;
         if (!containerWidth) return;
 
-        const focusText = parts.focus || "";
-        const leftText = parts.left || "";
-        const rightText = parts.right || "";
+        const fullText = (parts.left || "") + (parts.focus || "") + (parts.right || "");
+        const fullW = measureWidth(fullText, basePx);
 
-        const focusW = measureWidth(focusText, basePx);
-        const leftW = measureWidth(leftText, basePx);
-        const rightW = measureWidth(rightText, basePx);
+        const available = Math.max(0, containerWidth - FIT_PADDING_PX);
+        if (fullW <= available || fullW === 0) return;
 
-        const availablePerSide = Math.max(
-          0,
-          (containerWidth - focusW - FIT_PADDING_PX) / 2
-        );
-
-        const maxSideW = Math.max(leftW, rightW);
-
-        if (maxSideW <= availablePerSide || maxSideW === 0) return;
-
-        const scale = availablePerSide / maxSideW;
+        const scale = available / fullW;
         const newPx = Math.floor(basePx * scale);
 
         setFontPx(Math.max(MIN_FONT_PX, newPx));
@@ -455,32 +473,52 @@
         }, 2500);
       }
 
-      // ---- hyphen splitting ----
+      // ---- dash splitting (attach dashes to LEFT word) ----
+
+      // Covers: - ‐ - ‒ – — − ﹣ －
+      const DASH_CLASS = "\\-\\u2010\\u2011\\u2012\\u2013\\u2014\\u2212\\uFE63\\uFF0D";
+      const DASH_SPLIT_RE = new RegExp(`([${DASH_CLASS}])`, "g");
+      const DASH_INSIDE_WORD_RE = new RegExp(`[^\\s${DASH_CLASS}][${DASH_CLASS}][^\\s${DASH_CLASS}]`);
+      const DASH_ONLY_RE = new RegExp(`^[${DASH_CLASS}]$`);
+
       function stripTrailingPunct(token) {
         const m = token.match(/^(.*?)([.,!?;:]+["')\]]*)$/);
         if (!m) return { base: token, trail: "" };
         return { base: m[1], trail: m[2] };
       }
 
-      function looksHyphenated(base) {
-        return /^[^\s-]+-[^\s-]+/.test(base);
+      function shouldSplitDashes(base) {
+        return DASH_INSIDE_WORD_RE.test(base);
       }
 
-      function expandHyphenToken(token) {
+      function expandDashToken(token) {
         const { base, trail } = stripTrailingPunct(token);
 
-        if (!looksHyphenated(base)) return [token];
+        if (!shouldSplitDashes(base)) return [token];
 
-        const parts = base.split("-").filter(p => p.length > 0);
-        if (parts.length <= 1) return [token];
+        const rawParts = base.split(DASH_SPLIT_RE).filter(Boolean);
+        if (!rawParts.length) return [token];
 
-        const out = [];
-        for (let i = 0; i < parts.length; i++) {
-          const isLast = i === parts.length - 1;
-          if (isLast) out.push(parts[i] + trail);
-          else out.push(parts[i] + "-");
+        // Merge dash tokens into the token on their left
+        const merged = [];
+        for (const part of rawParts) {
+          if (DASH_ONLY_RE.test(part)) {
+            if (merged.length > 0) {
+              merged[merged.length - 1] = merged[merged.length - 1] + part;
+            } else {
+              merged.push(part);
+            }
+          } else {
+            merged.push(part);
+          }
         }
-        return out;
+
+        // Attach trailing punctuation to the final token
+        if (trail && merged.length) {
+          merged[merged.length - 1] = merged[merged.length - 1] + trail;
+        }
+
+        return merged;
       }
 
       function parseTextToWords(text) {
@@ -492,7 +530,7 @@
 
         const expanded = [];
         for (const tok of raw) {
-          const pieces = expandHyphenToken(tok);
+          const pieces = expandDashToken(tok);
           for (const p of pieces) expanded.push(p);
         }
         return expanded;
