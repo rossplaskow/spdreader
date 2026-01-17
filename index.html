@@ -47,7 +47,7 @@
       min-height:0;
     }
 
-    /* RSVP line: LEFT ALIGNED */
+    /* RSVP line */
     .rsvp{
       width:100%;
       max-width: 900px;
@@ -68,7 +68,9 @@
       /* breathing room inside word area */
       padding: 10px 10px;
 
-      transform:none;
+      /* JS will set translateX each render */
+      transform: translateX(0px);
+      will-change: transform;
     }
 
     .left{
@@ -80,6 +82,9 @@
       color:var(--accent);
       font-weight:900;
       padding:0;
+
+      /* important: makes width/centre stable for getBoundingClientRect */
+      display:inline-block;
     }
     .right{
       text-align:left;
@@ -220,7 +225,14 @@
       const FIT_PADDING_PX = 22;
 
       // Focus letter position in word
-      const FOCUS_FRACTION = 0.0; // first letter
+      // 0.00 = first letter
+      // 0.10 = 10% into the word
+      // 0.40 = classic-ish RSVP position
+      const FOCUS_FRACTION = 0.2;
+
+      // This is your "nudge" after perfect centring
+      // negative = left, positive = right
+      const FOCUS_CENTER_OFFSET_PX = -100;
 
       // -------- localStorage keys --------
       const LS_IDX  = "rsvp_idx";
@@ -255,6 +267,12 @@
       const measureCanvas = document.createElement("canvas");
       const measureCtx = measureCanvas.getContext("2d");
 
+      // For stable centring (avoid oscillation)
+      let centreRAF = null;
+
+      // IMPORTANT: store the "real default font size" once, so it never drifts smaller
+      let DEFAULT_FONT_PX = null;
+
       function clamp(n, lo, hi) {
         return Math.max(lo, Math.min(hi, n));
       }
@@ -269,11 +287,7 @@
         return Math.round(60000 / wpm);
       }
 
-      // Allow lots of trailing "closers" after punctuation:
-      // straight quotes " '
-      // curly quotes ” ’
-      // brackets ) ] }
-      // french/angle quotes »
+      // Allow lots of trailing "closers" after punctuation
       const TRAIL_CLOSERS = `["')\\]\\}”’»]`;
 
       function stripNewlineMarkers(word) {
@@ -285,8 +299,15 @@
         return m ? m[0].length : 0;
       }
 
+      // ✅ sentence end:
+      //  - normal: hello.  hello!”  hello.)
+      //  - ALSO: hello.6   hello.”6 (reference marker after full stop)
       function isSentenceEnd(word) {
-        const re = new RegExp(`[.!?](?:${TRAIL_CLOSERS})*$`);
+        const re = new RegExp(
+          `(?:[!?](?:${TRAIL_CLOSERS})*$)|` +                 // ! or ?
+          `(?:\\.(?:${TRAIL_CLOSERS})*$)|` +                  // normal full stop end
+          `(?:\\.(?:${TRAIL_CLOSERS})*\\d+(?:${TRAIL_CLOSERS})*$)` // full stop then digits at end
+        );
         return re.test(word);
       }
 
@@ -305,19 +326,16 @@
         return re.test(word);
       }
 
-      // Includes common hyphen/dash characters:
-      // - ‐ - ‒ – — − ﹣ －
+      // Includes common hyphen/dash characters
       function isDashEnd(word) {
         const re = new RegExp(`[-\\u2010\\u2011\\u2012\\u2013\\u2014\\u2212\\uFE63\\uFF0D](?:${TRAIL_CLOSERS})*$`);
         return re.test(word);
       }
 
       function extraHoldMs(wordRaw) {
-        // newline hold always applies, even if no punctuation (headings, titles)
         const nlCount = countTrailingNewlines(wordRaw);
         const newlineHold = nlCount * NEWLINE_HOLD_MS;
 
-        // punctuation checks should ignore newline markers
         const word = stripNewlineMarkers(wordRaw);
 
         let punct = 0;
@@ -334,7 +352,7 @@
         const len = word.length;
         if (len <= 1) return 0;
 
-        const raw = Math.floor(len * FOCUS_FRACTION);
+        const raw = Math.round(len * FOCUS_FRACTION);
         return clamp(raw, 0, len - 1);
       }
 
@@ -372,13 +390,6 @@
         localStorage.setItem(LS_FILE, name);
       }
 
-      // ---- shrink-to-fit long words ----
-      function getBaseFontPx() {
-        const cs = getComputedStyle(rsvpLine);
-        const px = parseFloat(cs.fontSize);
-        return Number.isFinite(px) ? px : 48;
-      }
-
       function setFontPx(px) {
         rsvpLine.style.fontSize = `${px}px`;
       }
@@ -389,8 +400,18 @@
         return measureCtx.measureText(text).width;
       }
 
+      // ✅ shrink-to-fit, but ALWAYS reset to true default first,
+      // so font does NOT drift smaller over time
       function fitWordToScreen(parts) {
-        const basePx = getBaseFontPx();
+        if (DEFAULT_FONT_PX === null) {
+          const cs = getComputedStyle(rsvpLine);
+          const px = parseFloat(cs.fontSize);
+          DEFAULT_FONT_PX = Number.isFinite(px) ? px : 48;
+        }
+
+        const basePx = DEFAULT_FONT_PX;
+
+        // Always reset to default size for each word
         setFontPx(basePx);
 
         const containerWidth = rsvpLine.clientWidth;
@@ -400,12 +421,48 @@
         const fullW = measureWidth(fullText, basePx);
 
         const available = Math.max(0, containerWidth - FIT_PADDING_PX);
-        if (fullW <= available || fullW === 0) return;
 
+        // If it fits, keep default size (important)
+        if (fullW <= available || fullW === 0) {
+          setFontPx(basePx);
+          return;
+        }
+
+        // Otherwise shrink just for this word
         const scale = available / fullW;
         const newPx = Math.floor(basePx * scale);
-
         setFontPx(Math.max(MIN_FONT_PX, newPx));
+      }
+
+      // ---- centre the highlighted letter consistently ----
+      function centreFocusLetterNow() {
+        const centreEl = rsvpLine.parentElement; // .centre
+        if (!centreEl) return;
+
+        // ALWAYS measure from a known state (no previous translateX)
+        rsvpLine.style.transform = "translateX(0px)";
+
+        // Force layout so measurements are correct this frame
+        rsvpLine.getBoundingClientRect();
+
+        const centreRect = centreEl.getBoundingClientRect();
+        const focusRect = focusCharEl.getBoundingClientRect();
+
+        if (!focusRect.width || !centreRect.width) return;
+
+        const desiredX = centreRect.left + (centreRect.width / 2) + FOCUS_CENTER_OFFSET_PX;
+        const currentX = focusRect.left + (focusRect.width / 2);
+
+        const delta = desiredX - currentX;
+        rsvpLine.style.transform = `translateX(${delta}px)`;
+      }
+
+      function scheduleCentreFocus() {
+        if (centreRAF !== null) cancelAnimationFrame(centreRAF);
+        centreRAF = requestAnimationFrame(() => {
+          centreRAF = null;
+          centreFocusLetterNow();
+        });
       }
 
       function formatProgress() {
@@ -424,6 +481,7 @@
           focusCharEl.textContent = "•";
           rightPartEl.textContent = "";
           progressTiny.textContent = "";
+          rsvpLine.style.transform = "translateX(0px)";
           return;
         }
 
@@ -438,6 +496,9 @@
         progressTiny.textContent = formatProgress();
 
         fitWordToScreen(parts);
+
+        // Centre after DOM updates (prevents oscillation / alternating alignment)
+        scheduleCentreFocus();
       }
 
       function scheduleNext() {
@@ -495,7 +556,6 @@
         wpm = normaliseWpm(newWpm);
         setSpeedBox();
         if (playing) scheduleNext();
-        // Save only on pause
       }
 
       function showToast(msg) {
@@ -508,15 +568,12 @@
       }
 
       // ---- dash splitting (attach dashes to LEFT word) ----
-
-      // Covers: - ‐ - ‒ – — − ﹣ －
       const DASH_CLASS = "\\-\\u2010\\u2011\\u2012\\u2013\\u2014\\u2212\\uFE63\\uFF0D";
       const DASH_SPLIT_RE = new RegExp(`([${DASH_CLASS}])`, "g");
       const DASH_INSIDE_WORD_RE = new RegExp(`[^\\s${DASH_CLASS}][${DASH_CLASS}][^\\s${DASH_CLASS}]`);
       const DASH_ONLY_RE = new RegExp(`^[${DASH_CLASS}]$`);
 
       function stripTrailingPunct(token) {
-        // Also allow curly quotes and extra closers
         const m = token.match(/^(.*?)([.,!?;:]+["')\]\}”’»]*)$/);
         if (!m) return { base: token, trail: "" };
         return { base: m[1], trail: m[2] };
@@ -534,7 +591,6 @@
         const rawParts = base.split(DASH_SPLIT_RE).filter(Boolean);
         if (!rawParts.length) return [token];
 
-        // Merge dash tokens into the token on their left
         const merged = [];
         for (const part of rawParts) {
           if (DASH_ONLY_RE.test(part)) {
@@ -548,7 +604,6 @@
           }
         }
 
-        // Attach trailing punctuation to the final token
         if (trail && merged.length) {
           merged[merged.length - 1] = merged[merged.length - 1] + trail;
         }
@@ -565,8 +620,6 @@
         const lines = cleaned.split("\n");
         const expanded = [];
 
-        // We add "\n" markers onto the final word of each line.
-        // Blank lines stack extra "\n" markers, giving a longer pause.
         for (let li = 0; li < lines.length; li++) {
           const lineRaw = lines[li];
           const line = lineRaw.trim();
@@ -582,12 +635,10 @@
               for (const p of pieces) expanded.push(p);
             }
 
-            // End-of-line pause marker (if not last line in file)
             if (li < lines.length - 1 && expanded.length) {
               expanded[expanded.length - 1] = expanded[expanded.length - 1] + "\n";
             }
           } else {
-            // Blank line: extend the previous word's newline markers
             if (li < lines.length - 1 && expanded.length) {
               expanded[expanded.length - 1] = expanded[expanded.length - 1] + "\n";
             }
@@ -642,16 +693,13 @@
       slowerBtn.addEventListener("click", () => setWpm(wpm - 10));
       fasterBtn.addEventListener("click", () => setWpm(wpm + 10));
 
-      // Tap word area toggles play/pause
       document.querySelector(".centre").addEventListener("click", () => togglePlayPause());
 
-      // Auto-pause when leaving (saves idx + WPM)
       document.addEventListener("visibilitychange", () => {
         if (document.hidden) pause();
       });
       window.addEventListener("beforeunload", () => pause());
 
-      // Re-fit on resize / rotation
       window.addEventListener("resize", () => {
         render();
       });
@@ -663,6 +711,11 @@
         setSpeedBox();
         setPlayButton();
         render();
+
+        // Capture true default font size once at startup (prevents drift)
+        const cs = getComputedStyle(rsvpLine);
+        const px = parseFloat(cs.fontSize);
+        DEFAULT_FONT_PX = Number.isFinite(px) ? px : 48;
 
         const savedFile = localStorage.getItem(LS_FILE) || DEFAULT_FILE;
         loadTextFile(savedFile);
